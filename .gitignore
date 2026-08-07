@@ -1,0 +1,16 @@
+.env
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# virtual environment
+.venv/
+venv/
+ENV/
+
+mini_project/mini_project-3/
+mini_project/runs/
+*.pt
