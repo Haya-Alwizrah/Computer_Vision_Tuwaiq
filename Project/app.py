@@ -22,12 +22,12 @@ app = Flask(__name__)
 DATABASE = "database/emergency.db"
 LANES = ["North", "East", "South", "West"]
 VIDEO_PATHS = {
-    "North": "videos/north.mp4",
-    "East": "videos/east.mp4",
-    "South": "videos/south.mp4",
-    "West": "videos/west.mp4"
+    "North": "static/videos/north.mp4",
+    "East": "static/videos/east.mp4",
+    "South": "static/videos/south.mp4",
+    "West": "static/videos/west.mp4"
 }
-AMBULANCE_MODEL_PATH = "models/ambulance_model.pt"
+AMBULANCE_MODEL_PATH = "models/ambulance_model1.pt"
 SIREN_MODEL_PATH = "models/siren_classifier.keras"
 SIREN_CONFIG_PATH = "models/siren_model_config.json"
 
@@ -64,6 +64,18 @@ emergency_active = False
 priority_lane = None
 active_event_id = None
 state_lock = threading.Lock()
+
+GREEN_DURATION = 10
+YELLOW_DURATION = 3
+
+AMBULANCE_MISSING_LIMIT = 3
+signal_order = ["North", "East", "South", "West"]
+
+normal_signal_index = 0
+normal_signal_phase = "GREEN"
+normal_phase_start = time.time()
+
+ambulance_missing_count = 0
 
 # ---------------------------------------------- DATABASE ----------------------------------------
 def get_db():
@@ -198,7 +210,7 @@ def predict_siren(audio_path):
 
 # ---------------------------------------------------------- YOLO - AMBULANCE DETECTION----------------------------------------------
 def detect_ambulance(frame):
-    results = ambulance_model.predict(source=frame, conf=0.50, verbose=False)
+    results = ambulance_model.predict(source=frame, conf=0.25, verbose=False)
     highest_confidence = 0.0
     ambulance_detected = False
 
@@ -208,13 +220,54 @@ def detect_ambulance(frame):
 
         for box in result.boxes:
             confidence = float(box.conf[0])
-            if confidence > highest_confidence:
-                highest_confidence = confidence
-                ambulance_detected = True
+            class_id = int(box.cls[0])
+
+            class_name = ambulance_model.names.get(class_id, str(class_id))
+            print(
+                f"[YOLO] "
+                f"class={class_name} "
+                f"id={class_id}"
+                f"conf={confidence:.2%}"
+            )
+
+            if class_name.lower() == "ambulance":
+                if confidence > highest_confidence:
+                    highest_confidence = confidence
+                    ambulance_detected = True
 
     return ambulance_detected, highest_confidence
 
 # ------------------------------------------------------- SIGNAL CONTROL -------------------------------------------
+def update_normal_signals():
+    global normal_signal_index
+    global normal_signal_phase
+    global normal_phase_start
+
+    now = time.time()
+    elapsed = now - normal_phase_start
+
+    current_lane = signal_order[normal_signal_index]
+
+    with state_lock:
+        if normal_signal_phase == "GREEN":
+            for lane in LANES:
+                signal_state[lane] = "RED"
+            signal_state[current_lane] = "GREEN"
+
+            if elapsed >= GREEN_DURATION:
+                normal_signal_phase = "YELLOW"
+                normal_phase_start = now
+
+        elif normal_signal_phase == "YELLOW":
+            for lane in LANES:
+                signal_state[lane] = "RED"
+
+            signal_state[current_lane] = "YELLOW"
+            if elapsed >= YELLOW_DURATION:
+                normal_signal_index = (normal_signal_index + 1) % len(signal_order)
+                normal_signal_phase = "GREEN"
+                normal_phase_start = now
+
 def open_signal(approach):
     global signal_state
 
@@ -223,27 +276,29 @@ def open_signal(approach):
             signal_state[lane] = "RED"
         signal_state[approach] = "GREEN"
 
-    print(f"[SIGNAL] {approach} OPEN")
+    print(f"[EMERGENCY SIGNAL] {approach} = GREEN")
 
 def close_signal(approach):
-    global signal_state
-
     with state_lock:
-        signal_state = {
-            "North": "RED",
-            "East": "GREEN",
-            "South": "RED",
-            "West": "RED"
-        }
+        for lane in LANES:
+            signal_state[lane] = "RED"
 
-    print(f"[SIGNAL] {approach} CLOSED")
+    print(f"[EMERGENCY SIGNAL] {approach} = CLOSED")
 
 # --------------------------------------------------- REGISTER EMERGENCY-------------------------------------
-def register_emergency(approach, ambulance_confidence, siren_confidence):
+def register_emergency(approach, ambulance_confidence, siren_confidence=0.0):
     global emergency_active
     global priority_lane
     global active_event_id
 
+    with state_lock:
+        if emergency_active:
+            return
+        emergency_active = True
+        priority_lane = approach
+
+    ambulance_missing_count = 0
+    
     now = datetime.now()
     date = now.strftime("%d/%m/%Y")
     start_time = now.strftime("%H:%M:%S")
@@ -350,17 +405,25 @@ def close_emergency():
 
 # --------------------------------------------------------------------------------- PROCESS ONE VIDEO -----------------------------------------------
 def process_video(approach, video_path):
+    global ambulance_missing_count
+
+    print(f"\n[{approach}]")
+    print(f"Path: {os.path.abspath(video_path)}")
+    print(f"Exists: {os.path.exists(video_path)}")
+
     print(f"[START] Monitoring {approach}")
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(os.path.abspath(video_path), cv2.CAP_FFMPEG)
+    print(f"Opened: {cap.isOpened()}")
     if not cap.isOpened():
         print(f"[ERROR] Cannot open {video_path}")
         return
 
     fps = cap.get(cv2.CAP_PROP_FPS)
+    print(f"FPS: {fps}")
     if fps <= 0:
         fps = 25
 
-    frame_interval = int(fps)
+    frame_interval = max(1, int(fps))
     frame_counter = 0
 
     while True:
@@ -379,62 +442,72 @@ def process_video(approach, video_path):
         ambulance_detected, ambulance_confidence = detect_ambulance(frame)
         print(
             f"[{approach}] "
-            f"Ambulance: "
-            f"{ambulance_detected} "
-            f"({ambulance_confidence:.2%})"
+            f"Ambulance: {ambulance_detected} "
+            f"Confidence: ({ambulance_confidence:.2%})"
         )
 
-        if not ambulance_detected:
+        with state_lock:
+            current_emergency = emergency_active
+            current_priority = priority_lane
+
+        if current_emergency:
+            if current_priority == approach:
+                if ambulance_detected:
+                    ambulance_missing_count = 0
+                    print(
+                        f"[{approach}] "
+                        "Ambulance still present"
+                    )
+                else:
+
+                    ambulance_missing_count += 1
+                    print(
+                        f"[{approach}] "
+                        f"Ambulance missing "
+                        f"({ambulance_missing_count}/"
+                        f"{AMBULANCE_MISSING_LIMIT})"
+                    )
+
+                    if (ambulance_missing_count >= AMBULANCE_MISSING_LIMIT):
+                        close_emergency()
+                        ambulance_missing_count = 0
             continue
 
-        # STEP 2: AMBULANCE DETECTED ->> NOW check audio.
-        print(f"[{approach}] Ambulance detected!")
-        print(f"[{approach}] Checking siren...")
-
-        audio_path = extract_audio_from_video(video_path, duration=3)
-        if audio_path is None:
+        if ambulance_detected:
             print(
                 f"[{approach}] "
-                "Could not extract audio."
+                "AMBULANCE DETECTED!"
             )
-            continue
 
-        try:
-            siren_result = predict_siren(audio_path)
-
-        finally:
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-
-        print(
-            f"[{approach}] "
-            f"Siren: "
-            f"{siren_result['label']} "
-            f"({siren_result['confidence']:.2%})"
-        )
-
-        # STEP 3: FINAL DECISION
-        if (siren_result["label"] == "Siren"):
-            with state_lock:
-                already_active = emergency_active
-
-            if not already_active:
-                register_emergency(approach, ambulance_confidence, siren_result["confidence"])
-        else:
-            print(
-                f"[{approach}] "
-                "Ambulance detected but "
-                "NO SIREN."
-            )
+            register_emergency(approach, ambulance_confidence, 0.0)
 
 # -------------------------------- START ALL VIDEO MONITORS------------------------------------------
+def signal_controller():
+    print("[SIGNAL] Normal traffic controller started")
+
+    while True:
+        with state_lock:
+            emergency = emergency_active
+
+        if not emergency:
+            update_normal_signals()
+        time.sleep(0.1)
+
 def start_video_monitors():
+    signal_thread = threading.Thread(
+        target=signal_controller,
+        daemon=True
+    )
+
+    signal_thread.start()
+
     for approach, video_path in VIDEO_PATHS.items():
         thread = threading.Thread(
             target=process_video,
             args=(approach, video_path),
             daemon=True
         )
+
         thread.start()
 
 # ---------------------------------- RUN FLASK----------------------------------------
