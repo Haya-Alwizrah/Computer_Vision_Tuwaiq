@@ -1,32 +1,9 @@
-<!DOCTYPE html>
-<html lang="en">
+{% extends "base.html" %}
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Emergency Traffic Control</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}Emergency Traffic Control{% endblock %}
+{% block dashboard_active %}active{% endblock %}
 
-
-<body>
-
-<header class="topbar">
-    <div class="brand">
-        <div class="brand-icon">ETC</div>
-        <div>
-            <h1>Emergency Traffic Control</h1>
-            <p>Intelligent Emergency Vehicle Priority System</p>
-        </div>
-    </div>
-
-    <nav>
-        <a href="/" class="active">Dashboard</a>
-        <a href="/history">Emergency History</a>
-    </nav>
-</header>
-
-
+{% block content %}
 <main class="dashboard">
     <section class="location-bar">
         <div>
@@ -41,6 +18,21 @@
             <span>TIME</span>
             <strong id="time">--</strong>
         </div>
+
+    </section>
+
+    <section class="simulation-control">
+
+        <div class="simulation-status">
+            <span>SYSTEM STATUS</span>
+            <strong id="system-status">READY</strong>
+        </div>
+
+        <div class="simulation-buttons">
+            <button id="start-btn" class="start-btn" onclick="startSimulation()">START SIMULATION</button>
+            <button id="stop-btn" class="stop-btn" onclick="stopSimulation()" disabled>STOP SIMULATION</button>
+        </div>
+
     </section>
 
     <section id="emergency-banner" class="emergency-banner hidden">
@@ -51,8 +43,8 @@
     </section>
 
     <section class="camera-grid">
-        <article class="camera-card">
 
+        <article class="camera-card">
             <div class="camera-header">
                 <div>
                     <span>CAMERA 01</span>
@@ -60,12 +52,10 @@
                 </div>
                 <div class="live"><i></i>LIVE</div>
             </div>
+
             <div class="video-container">
-                <video autoplay muted loop playsinline>
-                    <source
-                        src="{{ url_for('static', filename='videos/north.mp4') }}"
-                        type="video/mp4"
-                    >
+                <video autoplay muted loop playsinline controls>
+                    <source src="{{ url_for('static', filename='videos/north.mp4') }}" type="video/mp4">
                 </video>
 
                 <div class="video-placeholder">
@@ -83,13 +73,12 @@
                 </div>
                 <div class="live"><i></i>LIVE</div>
             </div>
+
             <div class="video-container">
-                <video autoplay muted loop playsinline>
-                    <source
-                        src="{{ url_for('static', filename='videos/east.mp4') }}"
-                        type="video/mp4"
-                    >
+                <video autoplay muted loop playsinline controls>
+                    <source src="{{ url_for('static', filename='videos/east.mp4') }}" type="video/mp4">
                 </video>
+
                 <div class="video-placeholder">
                     <span>EAST CAMERA</span>
                     <small>Live video feed</small>
@@ -105,13 +94,12 @@
                 </div>
                 <div class="live"><i></i>LIVE</div>
             </div>
+
             <div class="video-container">
-                <video autoplay muted loop playsinline>
-                    <source
-                        src="{{ url_for('static', filename='videos/south.mp4') }}"
-                        type="video/mp4"
-                    >
+                <video autoplay muted loop playsinline controls>
+                    <source src="{{ url_for('static', filename='videos/south.mp4') }}" type="video/mp4">
                 </video>
+
                 <div class="video-placeholder">
                     <span>SOUTH CAMERA</span>
                     <small>Live video feed</small>
@@ -127,13 +115,12 @@
                 </div>
                 <div class="live"><i></i>LIVE</div>
             </div>
+
             <div class="video-container">
-                <video autoplay muted loop playsinline>
-                    <source
-                        src="{{ url_for('static', filename='videos/west.mp4') }}"
-                        type="video/mp4"
-                    >
+                <video autoplay muted loop playsinline controls>
+                    <source src="{{ url_for('static', filename='videos/west.mp4') }}" type="video/mp4">
                 </video>
+
                 <div class="video-placeholder">
                     <span>WEST CAMERA</span>
                     <small>Live video feed</small>
@@ -154,11 +141,11 @@
             <div class="signal-card" id="signal-North">
                 <h3>North</h3>
                 <div class="traffic-light">
-                    <div class="light red"  data-lane="North" data-color="RED"></div>
+                    <div class="light red" data-lane="North" data-color="RED"></div>
                     <div class="light yellow" data-lane="North" data-color="YELLOW"></div>
                     <div class="light green" data-lane="North" data-color="GREEN"></div>
                 </div>
-                <strong class="signal-text" id="signal-text-North">RED</strong>
+                <strong class="signal-text" id="signal-text-North"> RED</strong>
             </div>
 
             <div class="signal-card" id="signal-East">
@@ -190,12 +177,14 @@
                 </div>
                 <strong class="signal-text" id="signal-text-West">RED</strong>
             </div>
-
+            
         </div>
     </section>
+
 </main>
+{% endblock %}
 
+
+{% block scripts %}
 <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
-
-</body>
-</html>
+{% endblock %}

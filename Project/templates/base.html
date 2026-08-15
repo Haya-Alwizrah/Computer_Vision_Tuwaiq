@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>
+        {% block title %}Emergency Traffic Control{% endblock %}
+    </title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+<header class="topbar">
+    <div class="brand">
+        <div class="brand-icon">ETC</div>
+        <div>
+            <h1>Emergency Traffic Control</h1>
+            <p>Intelligent Emergency Vehicle Priority System</p>
+        </div>
+    </div>
+
+    <nav>
+        <a href="/" class="{% block dashboard_active %}{% endblock %}">Dashboard</a>
+        <a href="/history" class="{% block history_active %}{% endblock %}">Emergency History</a>
+    </nav>
+</header>
+
+{% block content %}
+{% endblock %}
+
+{% block scripts %}
+{% endblock %}
+
+</body>
+</html>

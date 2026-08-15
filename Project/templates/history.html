@@ -1,31 +1,9 @@
-<!DOCTYPE html>
-<html lang="en">
+{% extends "base.html" %}
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Emergency History</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
+{% block title %}Emergency History{% endblock %}
+{% block history_active %}active{% endblock %}
 
-<body>
-
-<header class="topbar">
-    <div class="brand">
-        <div class="brand-icon">ETC</div>
-        <div>
-            <h1>Emergency Traffic Control</h1>
-            <p>Emergency Event Records</p>
-        </div>
-    </div>
-
-    <nav>
-        <a href="/">Dashboard</a>
-        <a href="/history"  class="active">Emergency History</a>
-    </nav>
-</header>
-
-
+{% block content %}
 <main class="history-page">
     <div class="history-header">
         <div>
@@ -65,37 +43,30 @@
                         <td>{{ event["date"] }}</td>
                         <td>{{ event["start_time"] }}</td>
                         <td>{{ event["end_time"] or "--" }}</td>
-                        <td>
-                            <span class="approach-badge">{{ event["approach"] }}</span>
-                        </td>
-
+                        <td><span class="approach-badge">{{ event["approach"] }}</span></td>
                         <td>
                             {% if event["ambulance_confidence"] is not none %}
-                                {{ "%.1f"|format(event["ambulance_confidence"]) }}%
+                                {{ "%.1f"|format(event["ambulance_confidence"] * 100) }}%
                             {% else %}
                                 --
                             {% endif %}
                         </td>
-
                         <td>
                             {% if event["siren_confidence"] is not none %}
-                                {{ "%.1f"|format(event["siren_confidence"]) }}%
+                                {{ "%.1f"|format(event["siren_confidence"] * 100) }}%
                             {% else %}
                                 --
                             {% endif %}
                         </td>
-
                         <td>{{ event["signal_opened"] or "--" }}</td>
                         <td>{{ event["signal_closed"] or "--" }}</td>
                         <td>{{ event["duration"] or "--" }}</td>
                     </tr>
                     {% endfor %}
-                {% else %}
 
+                {% else %}
                     <tr>
-                        <td colspan="10" class="empty-state">
-                            No emergency events have been recorded.
-                        </td>
+                        <td colspan="10" class="empty-state">No emergency events have been recorded.</td>
                     </tr>
                 {% endif %}
             </tbody>
@@ -103,5 +74,4 @@
     </div>
 </main>
 
-</body>
-</html>
+{% endblock %}
