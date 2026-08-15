@@ -290,14 +290,15 @@ def register_emergency(approach, ambulance_confidence, siren_confidence=0.0):
     global emergency_active
     global priority_lane
     global active_event_id
+    global ambulance_missing_count
+
+    ambulance_missing_count = 0
 
     with state_lock:
         if emergency_active:
             return
         emergency_active = True
         priority_lane = approach
-
-    ambulance_missing_count = 0
     
     now = datetime.now()
     date = now.strftime("%d/%m/%Y")
@@ -327,10 +328,6 @@ def register_emergency(approach, ambulance_confidence, siren_confidence=0.0):
     active_event_id = cursor.lastrowid
     conn.commit()
     conn.close()
-
-    with state_lock:
-        emergency_active = True
-        priority_lane = approach
 
     print("====================================")
     print("EMERGENCY DETECTED")
