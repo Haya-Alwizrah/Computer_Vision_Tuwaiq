@@ -1,0 +1,8 @@
+{
+    "sample_rate": 16000,
+    "threshold": 0.5,
+    "classes": {
+        "0": "No Siren",
+        "1": "Siren"
+    }
+}

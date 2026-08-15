@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Emergency History</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+<header class="topbar">
+    <div class="brand">
+        <div class="brand-icon">ETC</div>
+        <div>
+            <h1>Emergency Traffic Control</h1>
+            <p>Emergency Event Records</p>
+        </div>
+    </div>
+
+    <nav>
+        <a href="/">Dashboard</a>
+        <a href="/history"  class="active">Emergency History</a>
+    </nav>
+</header>
+
+
+<main class="history-page">
+    <div class="history-header">
+        <div>
+            <span class="eyebrow">SYSTEM RECORDS</span>
+            <h2>Emergency History</h2>
+            <p>Record of emergency traffic priority events.</p>
+        </div>
+
+        <div class="record-count">
+            <span>TOTAL EVENTS</span>
+            <strong>{{ events|length }}</strong>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Date</th>
+                    <th>Start Time</th>
+                    <th>End Time</th>
+                    <th>Approach</th>
+                    <th>Ambulance<br>Confidence</th>
+                    <th>Siren<br>Confidence</th>
+                    <th>Signal<br>Opened</th>
+                    <th>Signal<br>Closed</th>
+                    <th>Duration</th>
+                </tr>
+            </thead>
+
+            <tbody>
+                {% if events %}
+                    {% for event in events %}
+                    <tr>
+                        <td>{{ event["id"] }}</td>
+                        <td>{{ event["date"] }}</td>
+                        <td>{{ event["start_time"] }}</td>
+                        <td>{{ event["end_time"] or "--" }}</td>
+                        <td>
+                            <span class="approach-badge">{{ event["approach"] }}</span>
+                        </td>
+
+                        <td>
+                            {% if event["ambulance_confidence"] is not none %}
+                                {{ "%.1f"|format(event["ambulance_confidence"]) }}%
+                            {% else %}
+                                --
+                            {% endif %}
+                        </td>
+
+                        <td>
+                            {% if event["siren_confidence"] is not none %}
+                                {{ "%.1f"|format(event["siren_confidence"]) }}%
+                            {% else %}
+                                --
+                            {% endif %}
+                        </td>
+
+                        <td>{{ event["signal_opened"] or "--" }}</td>
+                        <td>{{ event["signal_closed"] or "--" }}</td>
+                        <td>{{ event["duration"] or "--" }}</td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+
+                    <tr>
+                        <td colspan="10" class="empty-state">
+                            No emergency events have been recorded.
+                        </td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</main>
+
+</body>
+</html>
