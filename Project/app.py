@@ -13,6 +13,7 @@ import threading
 import time
 import subprocess
 import tempfile
+import queue
 
 app = Flask(__name__)
 
@@ -62,13 +63,13 @@ signal_state = {
 emergency_active = False        # Is emergency currently active?
 priority_lane = None            # Which lane currently has priority?
 active_event_id = None          # Current database event
-previous_green_signal = None    # The traffic signal that was GREEN before emergency
 simulation_running = False      # Is the whole simulation running?
+
 state_lock = threading.Lock()   # Lock shared state between threads
-simulation_id = 0
+simulation_id = 0               # Used to invalidate old threads/tasks
 
 # NORMAL TRAFFIC SETTINGS 
-GREEN_DURATION = 7
+GREEN_DURATION = 8
 YELLOW_DURATION = 2
 
 signal_order = ["North", "East", "South", "West"]
@@ -88,6 +89,23 @@ ambulance_missing_count = {
 # THREAD MANAGEMENT
 signal_thread = None
 video_threads = []
+
+# AUDIO WORKER
+audio_queue = queue.Queue(maxsize=10)
+
+audio_check_pending = {
+    "North": False,
+    "East": False,
+    "South": False,
+    "West": False
+}
+audio_cooldown = {
+    "North": 0,
+    "East": 0,
+    "South": 0,
+    "West": 0
+}
+AUDIO_COOLDOWN_SECONDS = 5
 
 # -------------------------------------------------------------------------- DATABASE ----------------------------------------------------------------------------
 def get_db():
@@ -181,6 +199,9 @@ def start_simulation():
     global normal_signal_phase
     global normal_phase_start
     global simulation_id
+    global emergency_active
+    global priority_lane
+    global active_event_id
 
     with state_lock:
         if simulation_running:
@@ -198,25 +219,21 @@ def start_simulation():
         normal_signal_phase = "GREEN"
         normal_phase_start = time.time()    # Restart normal signal timing
 
-        global emergency_active
-        global priority_lane
-        global active_event_id
-        global previous_green_signal
-
         emergency_active = False
         priority_lane = None
         active_event_id = None
-        previous_green_signal = None
 
         # Reset signals
-        signal_state["North"] = "GREEN"
-        signal_state["East"] = "RED"
+        signal_state["North"] = "RED"
+        signal_state["East"] = "GREEN"
         signal_state["South"] = "RED"
         signal_state["West"] = "RED"
 
         # Reset ambulance counters
         for lane in LANES:
             ambulance_missing_count[lane] = 0
+            audio_check_pending[lane] = False
+            audio_cooldown[lane] = 0
 
     print("====================================")
     print("[SYSTEM] AI SIMULATION STARTED")
@@ -243,7 +260,6 @@ def stop_simulation():
     global emergency_active
     global priority_lane
     global active_event_id
-    global previous_green_signal
 
     with state_lock:
         simulation_running = False
@@ -253,7 +269,6 @@ def stop_simulation():
         emergency_active = False
         priority_lane = None
         active_event_id = None
-        previous_green_signal = None
 
         # Reset normal traffic
         normal_signal_index = 0
@@ -261,14 +276,16 @@ def stop_simulation():
         normal_phase_start = time.time()
 
         # Reset traffic lights
-        signal_state["North"] = "GREEN"
-        signal_state["East"] = "RED"
+        signal_state["North"] = "RED"
+        signal_state["East"] = "GREEN"
         signal_state["South"] = "RED"
         signal_state["West"] = "RED"
 
         # Reset ambulance counters
         for lane in LANES:
             ambulance_missing_count[lane] = 0
+            audio_check_pending[lane] = False
+            audio_cooldown[lane] = 0
 
     print("====================================")
     print("[SYSTEM] SIMULATION STOPPED")
@@ -290,14 +307,16 @@ def simulation_is_valid(thread_simulation_id):
         return (simulation_running and simulation_id == thread_simulation_id)
     
 # -------------------------------------------------------------------------- AUDIO FUNCTIONS --------------------------------------------------------------------------
-def extract_audio_from_video(video_path, duration=3):
+def extract_audio_from_video(video_path, timestamp, duration=3):
     temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     temp_file.close()
+    start_time = max(0, timestamp - duration)
+
     command = [
         "ffmpeg",
         "-y",
-        "-sseof",
-        f"-{duration}",
+        "-ss",
+        str(start_time),
         "-i",
         video_path,
         "-vn",
@@ -318,13 +337,14 @@ def extract_audio_from_video(video_path, duration=3):
             check=True
         )
 
+        print(
+            f"[AUDIO] Extracted "
+            f"{start_time:.2f}s -> {timestamp:.2f}s"
+        )
         return temp_file.name
 
     except Exception as e:
-        print(
-            f"[AUDIO ERROR] "
-            f"Could not extract audio: {e}"
-        )
+        print(f"[AUDIO ERROR] Could not extract audio: {e}")
 
         if os.path.exists(temp_file.name):
             os.remove(temp_file.name)
@@ -371,6 +391,93 @@ def predict_siren(audio_path):
             except:
                 pass
 
+def audio_worker():
+    print("[AUDIO] Audio worker started")
+
+    while True:
+        task = audio_queue.get()
+
+        if task is None:
+            audio_queue.task_done()
+            break
+
+        approach = task["approach"]
+        video_path = task["video_path"]
+        timestamp = task["timestamp"]
+        ambulance_confidence = task["ambulance_confidence"]
+        thread_simulation_id = task["simulation_id"]
+        detected_green_signal = task["detected_green_signal"]
+
+        try:
+            print(f"[AUDIO] Processing {approach} at {timestamp:.2f}s")
+            print(
+                f"[AUDIO] Signal GREEN "
+                f"when ambulance detected: {detected_green_signal}"
+            )
+
+            # Check simulation
+            if not simulation_is_valid(thread_simulation_id):
+                print(f"[AUDIO] Ignored {approach} - simulation stopped")
+                continue
+
+            audio_path = extract_audio_from_video(
+                video_path=video_path,
+                timestamp=timestamp,
+                duration=3
+            )
+
+            if audio_path is None:
+                print(f"[{approach}] Audio extraction failed")
+
+                register_detection(
+                    approach,
+                    ambulance_confidence,
+                    "No Siren",
+                    0.0,
+                    thread_simulation_id,
+                    detected_green_signal
+                )
+                continue
+
+            # Check simulation again
+            if not simulation_is_valid(thread_simulation_id):
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+                continue
+
+            # Siren model
+            siren_result = predict_siren(audio_path)
+
+            print(
+                f"[{approach}] "
+                f"Siren: {siren_result['label']} "
+                f"Confidence: {siren_result['confidence']:.2%}"
+            )
+
+            if not simulation_is_valid(thread_simulation_id):
+                continue
+
+            register_detection(
+                approach,
+                ambulance_confidence,
+                siren_result["label"],
+                siren_result["confidence"],
+                thread_simulation_id,
+                detected_green_signal
+            )
+
+            audio_cooldown[approach] = time.time() + AUDIO_COOLDOWN_SECONDS
+
+        except Exception as e:
+            print(
+                f"[AUDIO WORKER ERROR] "
+                f"{approach}: {e}"
+            )
+
+        finally:
+            audio_check_pending[approach] = False
+            audio_queue.task_done()
+
 # -------------------------------------------------------------------------- YOLO AMBULANCE DETECTION --------------------------------------------------------------------------
 def detect_ambulance(frame):
     results = ambulance_model.predict(source=frame, conf=0.50, verbose=False)
@@ -399,6 +506,14 @@ def detect_ambulance(frame):
                     ambulance_detected = True
 
     return ambulance_detected, highest_confidence
+
+# -------------------------------------------------------------------------- GET CURRENT GREEN SIGNAL --------------------------------------------------------------------------
+def get_current_green_signal():
+    with state_lock:
+        for lane in LANES:
+            if signal_state[lane] == "GREEN":
+                return lane
+    return None
 
 # -------------------------------------------------------------------------- NORMAL SIGNAL CONTROL --------------------------------------------------------------------------
 def update_normal_signals():
@@ -434,17 +549,8 @@ def update_normal_signals():
 
 # -------------------------------------------------------------------------- OPEN / CLOSE EMERGENCY SIGNAL --------------------------------------------------------------------------
 def open_signal(approach):
-    global previous_green_signal
-
     with state_lock:
-        previous_green_signal = None
-
         for lane in LANES:
-            if signal_state[lane] == "GREEN":
-                previous_green_signal = lane
-                break
-
-        for lane in LANES:   
             signal_state[lane] = "RED"
 
         signal_state[approach] = "GREEN"
@@ -452,9 +558,7 @@ def open_signal(approach):
     print(
         f"[EMERGENCY SIGNAL] "
         f"{approach} = GREEN"
-        f"Previous GREEN signal = {previous_green_signal}"
     )
-    return previous_green_signal
 
 def close_signal(approach):
     with state_lock:
@@ -467,11 +571,10 @@ def close_signal(approach):
     )
 
 # -------------------------------------------------------------------------- REGISTER EMERGENCY --------------------------------------------------------------------------
-def register_detection(approach, ambulance_confidence, siren_label, siren_confidence, thread_simulation_id):
+def register_detection(approach, ambulance_confidence, siren_label, siren_confidence, thread_simulation_id, detected_green_signal):
     global emergency_active
     global priority_lane
     global active_event_id
-    global previous_green_signal
 
     if not simulation_is_valid(thread_simulation_id):
         print(
@@ -496,12 +599,13 @@ def register_detection(approach, ambulance_confidence, siren_label, siren_confid
                 return
 
             if emergency_active:
+                print(f"[{approach}] Emergency already active.")
                 return
 
             emergency_active = True
             priority_lane = approach
 
-        closed_signal = open_signal(approach)
+        open_signal(approach)
 
         conn = get_db()
         cursor = conn.execute("""
@@ -522,7 +626,7 @@ def register_detection(approach, ambulance_confidence, siren_label, siren_confid
             ambulance_confidence,
             "Siren",
             siren_confidence,
-            closed_signal
+            detected_green_signal
         ))
 
         active_event_id = cursor.lastrowid
@@ -534,7 +638,7 @@ def register_detection(approach, ambulance_confidence, siren_label, siren_confid
         print(f"Approach: {approach}")
         print(f"Ambulance: {ambulance_confidence:.2%}")
         print(f"Siren: {siren_confidence:.2%}")
-        print(f"Signal closed: {closed_signal}")
+        print(f"Signal closed: {detected_green_signal}")
         print("====================================")
         return
 
@@ -582,7 +686,6 @@ def close_emergency():
     global emergency_active
     global priority_lane
     global active_event_id
-    global previous_green_signal
 
     with state_lock:
         event_id = active_event_id
@@ -592,7 +695,6 @@ def close_emergency():
         with state_lock:
             emergency_active = False
             priority_lane = None
-            previous_green_signal = None
         return
 
     now = datetime.now()
@@ -642,7 +744,6 @@ def close_emergency():
         emergency_active = False
         priority_lane = None
         active_event_id = None
-        previous_green_signal = None
 
     for lane in LANES:
         ambulance_missing_count[lane] = 0
@@ -659,7 +760,6 @@ def process_video(approach, video_path, thread_simulation_id):
     print(f"[START] Monitoring {approach}")
     print(f"Simulation ID: {thread_simulation_id}")
 
-    # Open video
     cap = cv2.VideoCapture(os.path.abspath(video_path))
     print(f"Opened: {cap.isOpened()}")
 
@@ -668,83 +768,81 @@ def process_video(approach, video_path, thread_simulation_id):
         return
 
     fps = cap.get(cv2.CAP_PROP_FPS)
-    print(f"FPS: {fps}")
     if fps <= 0:
         fps = 25
+    print(f"FPS: {fps}")
 
-    frame_interval = max(1, int(fps))
+    # YOLO runs approximately 5 times per second
+    YOLO_FPS = 5
+    frame_interval = max(1, int(fps / YOLO_FPS))
     frame_counter = 0
+    ambulance_was_present = False       # Used to know when ambulance disappears
 
-    # VIDEO LOOP
     while True:
-        # Check whether THIS thread is still valid
+        # Check simulation
         if not simulation_is_valid(thread_simulation_id):
             cap.release()
-            print(
-                f"[STOP] "
-                f"{approach} thread invalidated"
-            )
+            print(f"[STOP] {approach} thread invalidated")
             return
 
+        # Read next frame
         ret, frame = cap.read()
         if not ret:
-            print(
-                f"[END] "
-                f"{approach} video ended"
-            )
-
+            print(f"[END] {approach} video ended - restarting")
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             frame_counter = 0
+
+            ambulance_was_present = False       # Reset detection state when video loops
+            audio_check_pending[approach] = False
+            audio_cooldown[approach] = 0
             continue
 
         frame_counter += 1
 
-        if (frame_counter % frame_interval != 0):
+        # Skip frames to control YOLO FPS
+        if frame_counter % frame_interval != 0:
             continue
+
+        # Current video timestamp
+        video_timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
 
         # STEP 1: YOLO
         ambulance_detected, ambulance_confidence = detect_ambulance(frame)
 
         if not simulation_is_valid(thread_simulation_id):
             cap.release()
-            print(
-                f"[STOP] "
-                f"{approach} detection cancelled"
-            )
+            print(f"[STOP] {approach} detection cancelled")
             return
 
         print(
             f"[{approach}] "
-            f"Ambulance: {ambulance_detected} "
+            f"Time: {video_timestamp:.2f}s | "
+            f"Ambulance: {ambulance_detected} | "
             f"Confidence: {ambulance_confidence:.2%}"
         )
 
-        # READ CURRENT EMERGENCY STATE
+        # Read emergency state
         with state_lock:
             current_emergency = emergency_active
             current_priority = priority_lane
 
-        # EMERGENCY ALREADY ACTIVE
-
+        # CASE 1: EMERGENCY IS ALREADY ACTIVE
         if current_emergency:
+
+            # Only monitor the ambulance that caused the current emergency
             if current_priority == approach:
                 if ambulance_detected:
                     ambulance_missing_count[approach] = 0
-                    print(
-                        f"[{approach}] "
-                        f"Ambulance still present"
-                    )
+                    print(f"[{approach}] Ambulance still present")
+
                 else:
                     ambulance_missing_count[approach] += 1
                     print(
                         f"[{approach}] "
                         f"Ambulance missing "
-                        f"("
-                        f"{ambulance_missing_count[approach]}"
-                        f"/"
-                        f"{AMBULANCE_MISSING_LIMIT}"
-                        f")"
+                        f"({ambulance_missing_count[approach]}/{AMBULANCE_MISSING_LIMIT})"
                     )
+
                     if (ambulance_missing_count[approach] >= AMBULANCE_MISSING_LIMIT):
                         if simulation_is_valid(thread_simulation_id):
                             close_emergency()
@@ -752,90 +850,66 @@ def process_video(approach, video_path, thread_simulation_id):
                         ambulance_missing_count[approach] = 0
             continue
 
-        # AMBULANCE DETECTED
-        if ambulance_detected:
-            print(
-                f"[{approach}] "
-                f"AMBULANCE DETECTED!"
-            )
+        # CASE 2: NO AMBULANCE
+        if not ambulance_detected:
+            # Remember that ambulance disappeared
+            if ambulance_was_present:
+                print(f"[{approach}] Ambulance disappeared")
 
-            # Check STOP before audio
-            if not simulation_is_valid(thread_simulation_id):
-                cap.release()
-                return
+            ambulance_was_present = False
 
-            # STEP 2: CHECK SIREN
-            print(
-                f"[{approach}] "
-                f"Checking siren..."
-            )
+            # Allow next ambulance to trigger audio
+            audio_check_pending[approach] = False
+            audio_cooldown[approach] = 0
 
-            audio_path = extract_audio_from_video(video_path, duration=3)
+            continue
 
-            # Check STOP after audio extraction
-            if not simulation_is_valid(thread_simulation_id):
-                if (audio_path and os.path.exists(audio_path)):
-                    try:
-                        os.remove(audio_path)
-                    except:
-                        pass
+        # CASE 3: AMBULANCE DETECTED
+        ambulance_was_present = True
+        print(f"[{approach}] AMBULANCE DETECTED!")
 
-                cap.release()
-                print(
-                    f"[STOP] "
-                    f"{approach} audio detection cancelled"
-                )
-                return
+        detected_green_signal = get_current_green_signal()
+        print(
+            f"[{approach}] Signal GREEN before "
+            f"emergency: {detected_green_signal}"
+        )
 
-            if audio_path is None:
-                print(
-                    f"[{approach}] "
-                    f"Could not extract audio."
-                    f"No emergency priority."
-                )
+        # Check if audio analysis is already running
+        if audio_check_pending[approach]:
+            print(f"[{approach}] Audio check already pending")
+            continue
 
-                register_detection(
-                    approach,
-                    ambulance_confidence,
-                    "No Siren",
-                    0.0,
-                    thread_simulation_id
-                )
-                continue
+        # Check cooldown
+        if time.time() < audio_cooldown[approach]:
+            print(f"[{approach}] Audio cooldown active")
+            continue
 
-            # SIREN MODEL
-            siren_result = predict_siren(audio_path)
+        # Check simulation
+        if not simulation_is_valid(thread_simulation_id):
+            cap.release()
+            return
 
-            if not simulation_is_valid(thread_simulation_id):
-                print(
-                    f"[STOP] "
-                    f"{approach} siren detection cancelled"
-                )
-                cap.release()
-                return
+        # Send audio task to worker
+        audio_task = {
+            "approach": approach,
+            "video_path": video_path,
+            "timestamp": video_timestamp,
+            "ambulance_confidence": ambulance_confidence,
+            "simulation_id": thread_simulation_id,
+            "detected_green_signal": detected_green_signal
+        }
 
-            print(
-                f"[{approach}] "
-                f"Siren: "
-                f"{siren_result['label']} "
-                f"Confidence: "
-                f"{siren_result['confidence']:.2%}"
-            )
+        try:
+            audio_queue.put_nowait(audio_task)
+            audio_check_pending[approach] = True
+            print(f"[{approach}] Audio task queued at {video_timestamp:.2f}s")
 
-            register_detection(
-                approach,
-                ambulance_confidence,
-                siren_result["label"],
-                siren_result["confidence"],
-                thread_simulation_id
-            )
+        except queue.Full:
+            print(f"[{approach}] Audio queue is full")
 
 # -------------------------------------------------------------------------- SIGNAL CONTROLLER --------------------------------------------------------------------------
 def signal_controller():
-    print(
-        "[SIGNAL] "
-        "Traffic controller thread started"
-    )
+    print("[SIGNAL] Traffic controller thread started")
 
     while True:
         with state_lock:
@@ -863,11 +937,20 @@ def start_video_monitors(current_simulation_id):
 # -------------------------------------------------------------------------- RUN FLASK --------------------------------------------------------------------------
 init_db()
 
+# SIGNAL CONTROLLER
 signal_thread = threading.Thread(
     target=signal_controller,
     daemon=True
 )
 signal_thread.start()
+
+# AUDIO WORKER
+audio_thread = threading.Thread(
+    target=audio_worker,
+    daemon=True
+)
+
+audio_thread.start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
