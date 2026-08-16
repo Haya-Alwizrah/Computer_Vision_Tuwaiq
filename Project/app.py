@@ -76,7 +76,12 @@ normal_phase_start = time.time()
 
 # AMBULANCE SETTINGS
 AMBULANCE_MISSING_LIMIT = 3
-ambulance_missing_count = 0     # Number of consecutive frames without ambulance
+ambulance_missing_count = {
+    "North": 0,
+    "East": 0,
+    "South": 0,
+    "West": 0
+}
 
 # THREAD MANAGEMENT
 signal_thread = None
@@ -151,6 +156,8 @@ def current_time():
 @app.route("/api/start", methods=["POST"])
 def start_simulation():
     global simulation_running
+    global normal_signal_index
+    global normal_signal_phase
     global normal_phase_start
 
     with state_lock:
@@ -162,13 +169,18 @@ def start_simulation():
             })
 
         simulation_running = True
+        normal_signal_index = 0
+        normal_signal_phase = "GREEN"
         normal_phase_start = time.time()    # Restart normal signal timing
 
     print("====================================")
-    print("[SYSTEM] SIMULATION STARTED")
+    print("[SYSTEM] AI SIMULATION STARTED")
+    print("[SYSTEM] Ambulance detection ACTIVE")
+    print("[SYSTEM] Siren detection ACTIVE")
     print("====================================")
 
     start_video_monitors()
+
     return jsonify({
         "success": True,
         "running": True
@@ -178,7 +190,6 @@ def start_simulation():
 @app.route("/api/stop", methods=["POST"])
 def stop_simulation():
     global simulation_running
-    global ambulance_missing_count
     global normal_signal_index
     global normal_signal_phase
     global normal_phase_start
@@ -201,7 +212,8 @@ def stop_simulation():
         signal_state["South"] = "RED"
         signal_state["West"] = "RED"
 
-    ambulance_missing_count = 0
+    for lane in LANES:
+        ambulance_missing_count[lane] = 0
 
     print("====================================")
     print("[SYSTEM] SIMULATION STOPPED")
@@ -322,10 +334,7 @@ def detect_ambulance(frame):
                     highest_confidence = confidence
                     ambulance_detected = True
 
-    return (
-        ambulance_detected,
-        highest_confidence
-    )
+    return ambulance_detected, highest_confidence
 
 # -------------------------------------------------------------------------- NORMAL SIGNAL CONTROL --------------------------------------------------------------------------
 def update_normal_signals():
@@ -357,7 +366,7 @@ def update_normal_signals():
                 normal_signal_phase = "GREEN"
                 normal_phase_start = now
 
-# -------------------------------------------------------------------------- OPEN EMERGENCY SIGNAL --------------------------------------------------------------------------
+# -------------------------------------------------------------------------- OPEN / CLOSE EMERGENCY SIGNAL --------------------------------------------------------------------------
 def open_signal(approach):
     with state_lock:
         for lane in LANES:
@@ -369,7 +378,6 @@ def open_signal(approach):
         f"{approach} = GREEN"
     )
 
-# -------------------------------------------------------------------------- CLOSE SIGNAL --------------------------------------------------------------------------
 def close_signal(approach):
     with state_lock:
         for lane in LANES:
@@ -385,9 +393,8 @@ def register_emergency(approach, ambulance_confidence, siren_confidence):
     global emergency_active
     global priority_lane
     global active_event_id
-    global ambulance_missing_count
 
-    ambulance_missing_count = 0
+    ambulance_missing_count[approach] = 0
 
     with state_lock:
         if emergency_active:
@@ -426,17 +433,9 @@ def register_emergency(approach, ambulance_confidence, siren_confidence):
 
     print("====================================")
     print("EMERGENCY DETECTED")
-    print(
-        f"Approach: {approach}"
-    )
-    print(
-        f"Ambulance: "
-        f"{ambulance_confidence:.2%}"
-    )
-    print(
-        f"Siren: "
-        f"{siren_confidence:.2%}"
-    )
+    print(f"Approach: {approach}")
+    print(f"Ambulance: {ambulance_confidence:.2%}")
+    print(f"Siren: {siren_confidence:.2%}")
     print("====================================")
 
 # -------------------------------------------------------------------------- CLOSE EMERGENCY --------------------------------------------------------------------------
@@ -444,7 +443,6 @@ def close_emergency():
     global emergency_active
     global priority_lane
     global active_event_id
-    global ambulance_missing_count
 
     with state_lock:
         event_id = active_event_id
@@ -508,7 +506,9 @@ def close_emergency():
         priority_lane = None
         active_event_id = None
 
-    ambulance_missing_count = 0
+    for lane in LANES:
+        ambulance_missing_count[lane] = 0
+
     print(
         f"[EMERGENCY CLOSED] "
         f"{approach}"
@@ -586,21 +586,21 @@ def process_video(approach, video_path):
             # Only monitor the ambulance's lane
             if current_priority == approach:
                 if ambulance_detected:
-                    ambulance_missing_count = 0
+                    ambulance_missing_count[approach] = 0
                     print(f"[{approach}] Ambulance still present")
                 else:
-                    ambulance_missing_count += 1
+                    ambulance_missing_count[approach] += 1
                     print(
                         f"[{approach}] "
                         f"Ambulance missing "
                         f"("
-                        f"{ambulance_missing_count}/"
+                        f"{ambulance_missing_count[approach]}/"
                         f"{AMBULANCE_MISSING_LIMIT}"
                         f")"
                     )
                     if (ambulance_missing_count >= AMBULANCE_MISSING_LIMIT):
                         close_emergency()
-                        ambulance_missing_count = 0
+                        ambulance_missing_count[approach] = 0
             continue
 
         # Ambulance detected
@@ -694,10 +694,17 @@ def start_video_monitors():
 if __name__ == "__main__":
     init_db()
 
+    signal_thread = threading.Thread(
+        target=signal_controller,
+        daemon=True
+    )
+    signal_thread.start()
+
     print("====================================")
     print("SYSTEM READY")
-    print("Simulation is OFF.")
-    print("Press START from the dashboard.")
+    print("Traffic lights are running normally.")
+    print("AI simulation is OFF.")
+    print("Press START to activate AI.")
     print("====================================")
 
     app.run(
