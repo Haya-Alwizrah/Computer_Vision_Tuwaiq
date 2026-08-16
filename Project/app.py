@@ -877,9 +877,5 @@ if __name__ == "__main__":
     print("Press START to activate AI.")
     print("====================================")
 
-    app.run(
-        debug=True,
-        host="0.0.0.0",
-        port=5000,
-        use_reloader=False
-    )
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
