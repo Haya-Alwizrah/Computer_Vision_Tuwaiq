@@ -861,14 +861,16 @@ def start_video_monitors(current_simulation_id):
         thread.start()
 
 # -------------------------------------------------------------------------- RUN FLASK --------------------------------------------------------------------------
-if __name__ == "__main__":
-    init_db()
+init_db()
 
-    signal_thread = threading.Thread(
-        target=signal_controller,
-        daemon=True
-    )
-    signal_thread.start()
+signal_thread = threading.Thread(
+    target=signal_controller,
+    daemon=True
+)
+signal_thread.start()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
 
     print("====================================")
     print("SYSTEM READY")
@@ -877,5 +879,4 @@ if __name__ == "__main__":
     print("Press START to activate AI.")
     print("====================================")
 
-    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
