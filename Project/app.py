@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request, send_from_directory
 import sqlite3
 from datetime import datetime
 from ultralytics import YOLO
@@ -13,6 +13,7 @@ import threading
 import time
 import subprocess
 import tempfile
+import shutil
 
 app = Flask(__name__)
 
@@ -62,6 +63,7 @@ signal_state = {
 emergency_active = False        # Is emergency currently active?
 priority_lane = None            # Which lane currently has priority?
 active_event_id = None          # Current database event
+previous_green_signal = None    # The traffic signal that was GREEN before emergency
 simulation_running = False      # Is the whole simulation running?
 state_lock = threading.Lock()   # Lock shared state between threads
 
@@ -81,6 +83,13 @@ ambulance_missing_count = {
     "East": 0,
     "South": 0,
     "West": 0
+}
+
+ambulance_in_scene = {
+    "North": False,
+    "East": False,
+    "South": False,
+    "West": False
 }
 
 # THREAD MANAGEMENT
@@ -104,8 +113,8 @@ def init_db():
             end_time TEXT,
             approach TEXT NOT NULL,
             ambulance_confidence REAL,
+            siren TEXT,
             siren_confidence REAL,
-            signal_opened TEXT,
             signal_closed TEXT,
             duration TEXT
         )
@@ -114,7 +123,6 @@ def init_db():
     conn.close()
 
 # -------------------------------------------------------------------------- DASHBOARD --------------------------------------------------------------------------
-
 @app.route("/")
 def dashboard():
     return render_template("dashboard.html", street_name="King Abdulaziz Road")
@@ -122,15 +130,35 @@ def dashboard():
 # -------------------------------------------------------------------------- HISTORY --------------------------------------------------------------------------
 @app.route("/history")
 def history():
+    filter_type = request.args.get("filter", "all")
+
     conn = get_db()
-    events = conn.execute("""
-        SELECT *
-        FROM emergency_history
-        ORDER BY id DESC
-    """).fetchall()
+    if filter_type == "emergency":
+        events = conn.execute("""
+            SELECT *
+            FROM emergency_history
+            WHERE siren = 'Siren'
+            ORDER BY id DESC
+        """).fetchall()
+
+    elif filter_type == "without_siren":
+        events = conn.execute("""
+            SELECT *
+            FROM emergency_history
+            WHERE siren = 'No Siren'
+            ORDER BY id DESC
+        """).fetchall()
+
+    else:
+        events = conn.execute("""
+            SELECT *
+            FROM emergency_history
+            ORDER BY id DESC
+        """).fetchall()
+
     conn.close()
 
-    return render_template("history.html", events=events)
+    return render_template("history.html", events=events, current_filter=filter_type)
 
 # -------------------------------------------------------------------------- CURRENT SYSTEM STATUS --------------------------------------------------------------------------
 @app.route("/api/status")
@@ -352,6 +380,7 @@ def update_normal_signals():
                 signal_state[lane] = "RED"
 
             signal_state[current_lane] = "GREEN"
+
             if elapsed >= GREEN_DURATION:
                 normal_signal_phase = "YELLOW"
                 normal_phase_start = now
@@ -361,6 +390,7 @@ def update_normal_signals():
                 signal_state[lane] = "RED"
 
             signal_state[current_lane] = "YELLOW"
+
             if elapsed >= YELLOW_DURATION:
                 normal_signal_index = (normal_signal_index + 1) % len(signal_order)
                 normal_signal_phase = "GREEN"
@@ -368,15 +398,27 @@ def update_normal_signals():
 
 # -------------------------------------------------------------------------- OPEN / CLOSE EMERGENCY SIGNAL --------------------------------------------------------------------------
 def open_signal(approach):
+    global previous_green_signal
+
     with state_lock:
+        previous_green_signal = None
+
         for lane in LANES:
+            if signal_state[lane] == "GREEN":
+                previous_green_signal = lane
+                break
+
+        for lane in LANES:   
             signal_state[lane] = "RED"
+
         signal_state[approach] = "GREEN"
 
     print(
         f"[EMERGENCY SIGNAL] "
         f"{approach} = GREEN"
+        f"Previous GREEN signal = {previous_green_signal}"
     )
+    return previous_green_signal
 
 def close_signal(approach):
     with state_lock:
@@ -389,53 +431,95 @@ def close_signal(approach):
     )
 
 # -------------------------------------------------------------------------- REGISTER EMERGENCY --------------------------------------------------------------------------
-def register_emergency(approach, ambulance_confidence, siren_confidence):
+def register_detection(approach, ambulance_confidence, siren_label, siren_confidence):
     global emergency_active
     global priority_lane
     global active_event_id
-
-    ambulance_missing_count[approach] = 0
-
-    with state_lock:
-        if emergency_active:
-            return
-
-        emergency_active = True
-        priority_lane = approach
+    global previous_green_signal
 
     now = datetime.now()
     date = now.strftime("%d/%m/%Y")
     start_time = now.strftime("%H:%M:%S")
-    open_signal(approach)
+
+    # CASE 1: AMBULANCE + SIREN
+    if siren_label == "Siren":
+        with state_lock:
+            if emergency_active:
+                return
+
+            emergency_active = True
+            priority_lane = approach
+
+        closed_signal = open_signal(approach)
+
+        conn = get_db()
+        cursor = conn.execute("""
+            INSERT INTO emergency_history (
+                date,
+                start_time,
+                approach,
+                ambulance_confidence,
+                siren,
+                siren_confidence,
+                signal_closed
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            date,
+            start_time,
+            approach,
+            ambulance_confidence,
+            "Siren",
+            siren_confidence,
+            closed_signal
+        ))
+
+        active_event_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        print("====================================")
+        print("EMERGENCY DETECTED")
+        print(f"Approach: {approach}")
+        print(f"Ambulance: {ambulance_confidence:.2%}")
+        print(f"Siren: {siren_confidence:.2%}")
+        print(f"Signal closed: {closed_signal}")
+        print("====================================")
+        return
+
+    # CASE 2: AMBULANCE WITHOUT SIREN
     conn = get_db()
-    cursor = conn.execute("""
+    conn.execute("""
         INSERT INTO emergency_history (
             date,
             start_time,
             approach,
             ambulance_confidence,
+            siren,
             siren_confidence,
-            signal_opened
+            signal_closed,
+            duration
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         date,
         start_time,
         approach,
         ambulance_confidence,
+        "No Siren",
         siren_confidence,
-        approach
+        None,
+        None
     ))
-
-    active_event_id = cursor.lastrowid
     conn.commit()
     conn.close()
 
     print("====================================")
-    print("EMERGENCY DETECTED")
+    print("AMBULANCE DETECTED - NO EMERGENCY")
     print(f"Approach: {approach}")
     print(f"Ambulance: {ambulance_confidence:.2%}")
     print(f"Siren: {siren_confidence:.2%}")
+    print("Traffic signal unchanged.")
     print("====================================")
 
 # -------------------------------------------------------------------------- CLOSE EMERGENCY --------------------------------------------------------------------------
@@ -443,6 +527,7 @@ def close_emergency():
     global emergency_active
     global priority_lane
     global active_event_id
+    global previous_green_signal
 
     with state_lock:
         event_id = active_event_id
@@ -452,10 +537,12 @@ def close_emergency():
         with state_lock:
             emergency_active = False
             priority_lane = None
+            previous_green_signal = None
         return
 
     now = datetime.now()
     end_time = now.strftime("%H:%M:%S")
+
     conn = get_db()
     event = conn.execute("""
         SELECT start_time
@@ -488,12 +575,10 @@ def close_emergency():
         UPDATE emergency_history
         SET
             end_time = ?,
-            signal_closed = ?,
             duration = ?
         WHERE id = ?
     """, (
         end_time,
-        approach,
         duration,
         event_id
     ))
@@ -505,14 +590,13 @@ def close_emergency():
         emergency_active = False
         priority_lane = None
         active_event_id = None
+        previous_green_signal = None
 
     for lane in LANES:
         ambulance_missing_count[lane] = 0
 
-    print(
-        f"[EMERGENCY CLOSED] "
-        f"{approach}"
-    )
+    print(f"[EMERGENCY CLOSED] {approach}")
+    print(f"[EMERGENCY DURATION] {duration}")
 
 # -------------------------------------------------------------------------- PROCESS ONE VIDEO --------------------------------------------------------------------------
 def process_video(approach, video_path):
@@ -617,6 +701,7 @@ def process_video(approach, video_path):
             if audio_path is None:
                 print(f"[{approach}] Could not extract audio.")
                 print(f"[{approach}] No emergency priority.")
+                register_detection(approach, ambulance_confidence, "No Siren", 0.0)
                 continue
 
             siren_result = predict_siren(audio_path)
@@ -626,27 +711,9 @@ def process_video(approach, video_path):
                 f"Siren confidence: {siren_result['confidence']:.2%}"
             )
 
-            # Ambulance + Siren
-            if siren_result["label"] == "Siren":
-                print(
-                    f"[{approach}] "
-                    f"AMBULANCE + SIREN CONFIRMED"
-                )
+            # SAVE DETECTION RESULT
+            register_detection(approach, ambulance_confidence, siren_result["label"], siren_result["confidence"])
 
-                register_emergency(approach, ambulance_confidence, siren_result["confidence"])
-
-            # Ambulance WITHOUT Siren
-            else:
-                print(
-                    f"[{approach}] "
-                    f"Ambulance detected "
-                    f"but NO SIREN."
-                )
-
-                print(
-                    f"[{approach}] "
-                    f"No emergency priority."
-                )
 
 # -------------------------------------------------------------------------- SIGNAL CONTROLLER --------------------------------------------------------------------------
 def signal_controller():
